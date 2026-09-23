@@ -10,16 +10,20 @@ import { Label } from "@/components/ui/label";
 const HERO = "https://images.unsplash.com/photo-1670915198844-51975abf6955?crop=entropy&cs=srgb&fm=jpg&q=85&w=1600";
 
 export default function Login() {
-  const { login, error } = useAuth();
+  const { login, register, error, serverError } = useAuth();
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [mode, setMode] = useState("login");
+  const [registration, setRegistration] = useState({ name: "", hotel_name: "", city: "", state: "", phone: "" });
   const [loading, setLoading] = useState(false);
 
   const submit = async (e) => {
     e.preventDefault();
     setLoading(true);
-    const ok = await login(email.trim(), password);
+    const ok = mode === "login"
+      ? await login(email.trim(), password)
+      : await register({ ...registration, email: email.trim(), password });
     setLoading(false);
     if (ok) navigate("/");
   };
@@ -58,15 +62,18 @@ export default function Login() {
               <Building2 className="h-6 w-6" />
             </div>
             <div>
-              <div className="font-display text-xl font-bold tracking-tight">HotelOS</div>
+              <div className="font-display text-xl font-bold tracking-tight">Innos</div>
               <div className="text-xs text-muted-foreground">Hotel Operating System</div>
             </div>
           </div>
 
-          <h1 className="font-display text-2xl font-bold tracking-tight">Welcome back</h1>
-          <p className="mt-1 text-sm text-muted-foreground">Sign in to manage your property.</p>
+          <h1 className="font-display text-2xl font-bold tracking-tight">{mode === "login" ? "Welcome back" : "Create your hotel account"}</h1>
+          <p className="mt-1 text-sm text-muted-foreground">{mode === "login" ? "Sign in to manage your property." : "Register as the hotel owner. You can invite staff after setup."}</p>
 
           <form onSubmit={submit} className="mt-8 space-y-4">
+            {mode === "register" && <>
+              {[["name", "Your name"], ["hotel_name", "Hotel name"], ["city", "City"], ["state", "State"], ["phone", "Phone"]].map(([key, label]) => <div className="space-y-1.5" key={key}><Label htmlFor={key}>{label}</Label><Input id={key} required value={registration[key]} onChange={(e) => setRegistration((current) => ({ ...current, [key]: e.target.value }))} /></div>)}
+            </>}
             <div className="space-y-1.5">
               <Label htmlFor="email">Email</Label>
               <Input id="email" data-testid="login-email" type="email" required value={email}
@@ -74,31 +81,36 @@ export default function Login() {
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="password">Password</Label>
-              <Input id="password" data-testid="login-password" type="password" required value={password}
+              <Input id="password" data-testid="login-password" type="password" minLength={mode === "register" ? 12 : undefined} required value={password}
                 onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
             </div>
 
-            {error && (
+            {(serverError || error) && (
               <div data-testid="login-error" className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">
-                {error}
+                {serverError || error}
               </div>
             )}
 
             <Button type="submit" data-testid="login-submit" disabled={loading}
               className="w-full rounded-lg py-6 text-base font-semibold">
-              {loading ? <Loader2 className="h-5 w-5 animate-spin" /> : "Sign in"}
+              {loading ? <Loader2 className="h-5 w-5 animate-spin" /> : mode === "login" ? "Sign in" : "Create account"}
             </Button>
           </form>
 
-          <div className="mt-8 rounded-xl border border-border bg-muted/40 p-4">
+          <button type="button" onClick={() => setMode(mode === "login" ? "register" : "login")} className="mt-4 w-full text-sm font-medium text-primary hover:underline">
+            {mode === "login" ? "New here? Create a hotel account" : "Already registered? Sign in"}
+          </button>
+
+          {mode === "login" && <div className="mt-8 rounded-xl border border-border bg-muted/40 p-4">
             <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Demo accounts</p>
             <div className="grid grid-cols-1 gap-1.5 text-sm">
               {[
-                ["Owner", "minhazalam.work@gmail.com", "Owner@123"],
+                ["Owner", "owner@example.com", "Owner@123"],
                 ["Manager", "manager@dharamshalaheights.in", "Manager@123"],
                 ["Front Desk", "frontdesk@dharamshalaheights.in", "Frontdesk@123"],
                 ["Housekeeping", "housekeeping@dharamshalaheights.in", "House@123"],
                 ["Maintenance", "maintenance@dharamshalaheights.in", "Maint@123"],
+                ["Accounts", "accounts@dharamshalaheights.in", "Accounts@123"],
               ].map(([role, em, pw]) => (
                 <button key={em} type="button" onClick={() => quick(em, pw)}
                   data-testid={`demo-${role.toLowerCase().replace(/\s+/g, "-")}`}
@@ -108,7 +120,7 @@ export default function Login() {
                 </button>
               ))}
             </div>
-          </div>
+          </div>}
         </motion.div>
       </div>
     </div>

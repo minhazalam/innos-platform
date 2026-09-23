@@ -88,7 +88,7 @@ export default function NewReservationDialog({ trigger, presetRoomId }) {
           <Button data-testid="new-reservation-btn"><Plus className="mr-2 h-4 w-4" /> New Reservation</Button>
         )}
       </DialogTrigger>
-      <DialogContent className="max-h-[90vh] overflow-y-auto hotelos-scroll sm:max-w-lg">
+      <DialogContent className="max-h-[90vh] overflow-y-auto innos-scroll sm:max-w-lg">
         <DialogHeader><DialogTitle className="font-display text-xl">New Reservation</DialogTitle></DialogHeader>
 
         <div className="space-y-4">

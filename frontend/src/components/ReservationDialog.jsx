@@ -3,9 +3,11 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   LogIn, LogOut, Wallet, QrCode, FileDown, Ban, Loader2, User, BedDouble,
-  CalendarRange, Users2, StickyNote,
+  CalendarRange, Users2, StickyNote, RotateCcw,
+  MessageCircle, Mail,
 } from "lucide-react";
 import api, { apiError } from "@/lib/api";
+import { useAuth } from "@/context/AuthContext";
 import { inr, fmtDate, SOURCE_LABELS } from "@/lib/format";
 import { ResStatusBadge } from "@/components/Shared";
 import {
@@ -31,12 +33,16 @@ function Detail({ icon: Icon, label, value }) {
 }
 
 export default function ReservationDialog({ id, open, onClose, canPay = true, canInvoice = true }) {
+  const { user } = useAuth();
   const qc = useQueryClient();
-  const [mode, setMode] = useState("view"); // view | pay | qr
+  const [mode, setMode] = useState("view"); // view | pay | qr | refund
   const [amount, setAmount] = useState("");
   const [method, setMethod] = useState("cash");
   const [reference, setReference] = useState("");
   const [qr, setQr] = useState(null);
+  const [refundTarget, setRefundTarget] = useState(null);
+  const [refundAmount, setRefundAmount] = useState("");
+  const [refundReason, setRefundReason] = useState("");
   const [invoiceLoading, setInvoiceLoading] = useState(false);
 
   const { data: res, isLoading } = useQuery({
@@ -73,6 +79,12 @@ export default function ReservationDialog({ id, open, onClose, canPay = true, ca
     onError: (e) => toast.error(apiError(e.response?.data?.detail)),
   });
 
+  const refund = useMutation({
+    mutationFn: async (body) => (await api.post("/payments/refund", body)).data,
+    onSuccess: () => { toast.success("Refund recorded"); setMode("view"); setRefundTarget(null); setRefundAmount(""); setRefundReason(""); refresh(); },
+    onError: (e) => toast.error(apiError(e.response?.data?.detail)),
+  });
+
   const genQr = async () => {
     const amt = parseFloat(amount || res.balance);
     if (!amt || amt <= 0) return toast.error("Enter a valid amount");
@@ -99,11 +111,17 @@ export default function ReservationDialog({ id, open, onClose, canPay = true, ca
     }
   };
 
+  const messageBody = res ? `Hello ${res.guest_name}, your hotel stay is ${res.status.replace("_", " ")} for ${fmtDate(res.check_in)} to ${fmtDate(res.check_out)}${res.room_number ? ` in room ${res.room_number}` : ""}.${res.balance > 0 ? ` Balance due: ${inr(res.balance)}.` : ""} Please contact us if you need assistance.` : "";
+  const waNumber = String(res?.guest_phone || "").replace(/\D/g, "");
+  const normalizedWaNumber = waNumber.length === 10 ? `91${waNumber}` : waNumber;
+  const whatsappHref = `https://wa.me/${normalizedWaNumber}?text=${encodeURIComponent(messageBody)}`;
+  const emailHref = `mailto:${encodeURIComponent(res?.guest_email || "")}?subject=${encodeURIComponent("Your hotel reservation")}\u0026body=${encodeURIComponent(messageBody)}`;
+
   const close = () => { setMode("view"); setQr(null); setAmount(""); onClose(); };
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && close()}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto hotelos-scroll sm:max-w-lg" data-testid="reservation-dialog">
+      <DialogContent className="max-h-[90vh] overflow-y-auto innos-scroll sm:max-w-lg" data-testid="reservation-dialog">
         {isLoading || !res ? (
           <div className="flex h-40 items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-primary" /></div>
         ) : (
@@ -124,6 +142,12 @@ export default function ReservationDialog({ id, open, onClose, canPay = true, ca
               <Detail icon={StickyNote} label="Source" value={SOURCE_LABELS[res.source] || res.source} />
             </div>
 
+            <div className="flex flex-wrap gap-2">
+              {normalizedWaNumber.length >= 11 && <Button size="sm" variant="outline" asChild><a href={whatsappHref} target="_blank" rel="noreferrer"><MessageCircle className="mr-2 h-4 w-4" />Draft WhatsApp</a></Button>}
+              {res.guest_email && <Button size="sm" variant="outline" asChild><a href={emailHref}><Mail className="mr-2 h-4 w-4" />Draft email</a></Button>}
+            </div>
+              <p className="text-xs text-muted-foreground">Message drafts open in your selected app. Innos does not send or track delivery.</p>
+
             {res.special_requests && (
               <div className="rounded-lg bg-muted/50 p-3 text-sm">
                 <span className="font-medium">Special requests: </span>{res.special_requests}
@@ -136,6 +160,25 @@ export default function ReservationDialog({ id, open, onClose, canPay = true, ca
               <div><div className="text-xs text-muted-foreground">Paid</div><div className="font-display text-lg font-bold text-emerald-600">{inr(res.paid_amount)}</div></div>
               <div><div className="text-xs text-muted-foreground">Balance</div><div className={`font-display text-lg font-bold ${res.balance > 0 ? "text-rose-600" : "text-emerald-600"}`}>{inr(res.balance)}</div></div>
             </div>
+
+            {res.payments?.length > 0 && <div className="space-y-2 rounded-xl border border-border p-4">
+              <div className="text-sm font-medium">Payment history</div>
+              {res.payments.map((payment) => {
+                const refundable = Math.max((payment.amount || 0) - (payment.refunded_amount || 0), 0);
+                return <div key={payment.id} className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-2 text-sm">
+                  <div><span className="font-medium">{inr(payment.amount)}</span><span className="ml-2 text-xs text-muted-foreground">{(payment.method || "").replace("_", " ").toUpperCase()} · {fmtDate(payment.created_at)}</span><span className="ml-2 text-xs capitalize text-muted-foreground">{payment.status}</span></div>
+                  {user.role === "owner" && payment.status === "completed" && refundable > 0 && <Button size="sm" variant="ghost" onClick={() => { setRefundTarget(payment); setRefundAmount(String(refundable)); setRefundReason(""); setMode("refund"); }}><RotateCcw className="mr-2 h-3.5 w-3.5" /> Refund</Button>}
+                </div>;
+              })}
+            </div>}
+
+            {mode === "refund" && refundTarget && <div className="space-y-3 rounded-xl border border-rose-200 bg-rose-50/50 p-4">
+              <div className="font-medium">Issue refund</div>
+              <p className="text-xs text-muted-foreground">This records a refund for reconciliation; money is not transferred by Innos.</p>
+              <div className="space-y-1.5"><Label>Amount (₹), up to {inr(refundTarget.amount - (refundTarget.refunded_amount || 0))}</Label><Input type="number" min="0.01" max={refundTarget.amount - (refundTarget.refunded_amount || 0)} value={refundAmount} onChange={(e) => setRefundAmount(e.target.value)} /></div>
+              <Input value={refundReason} onChange={(e) => setRefundReason(e.target.value)} placeholder="Reason / reference (optional)" />
+              <div className="flex gap-2"><Button variant="outline" className="flex-1" onClick={() => { setMode("view"); setRefundTarget(null); }}>Cancel</Button><Button className="flex-1" disabled={refund.isPending || !Number(refundAmount)} onClick={() => refund.mutate({ payment_id: refundTarget.id, amount: Number(refundAmount), reason: refundReason })}>{refund.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Record refund"}</Button></div>
+            </div>}
 
             {/* Payment mode */}
             {mode === "pay" && (

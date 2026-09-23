@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { ClipboardList, Search } from "lucide-react";
 import api from "@/lib/api";
@@ -22,6 +23,9 @@ export default function Reservations() {
   const [status, setStatus] = useState("");
   const [q, setQ] = useState("");
   const [openId, setOpenId] = useState(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const reservationIdFromSearch = searchParams.get("id");
+  useEffect(() => { if (reservationIdFromSearch) setOpenId(reservationIdFromSearch); }, [reservationIdFromSearch]);
 
   const { data = [], isLoading } = useQuery({
     queryKey: ["reservations", status],
@@ -86,7 +90,7 @@ export default function Reservations() {
         </div>
       )}
 
-      {openId && <ReservationDialog id={openId} open={!!openId} onClose={() => setOpenId(null)} />}
+      {openId && <ReservationDialog id={openId} open={!!openId} onClose={() => { setOpenId(null); if (searchParams.has("id")) setSearchParams({}); }} />}
     </div>
   );
 }

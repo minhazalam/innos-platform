@@ -1,12 +1,9 @@
 import os
 import random
 from datetime import date, timedelta
-from pathlib import Path
 
 from core import db, now_utc
 from security import hash_password
-
-MEMORY = Path("/app/memory/test_credentials.md")
 
 ROOM_TYPES = [
     {"name": "Standard", "base_price": 2800, "capacity": 2,
@@ -48,6 +45,13 @@ async def seed_admin():
             "name": "Minhaz Alam", "email": email, "password_hash": hash_password(password),
             "role": "owner", "property_id": str(prop["_id"]), "active": True,
             "created_at": now_utc().isoformat()})
+    accounts_email = os.environ.get("DEMO_ACCOUNTS_EMAIL", "accounts@dharamshalaheights.in").lower()
+    if not await db.users.find_one({"email": accounts_email}):
+        await db.users.insert_one({
+            "name": "Accounts Team", "email": accounts_email,
+            "password_hash": hash_password(os.environ.get("DEMO_ACCOUNTS_PASSWORD", "Accounts@123")),
+            "role": "accounts", "property_id": str(prop["_id"]), "active": True,
+            "created_at": now_utc().isoformat()})
 
 
 async def seed_demo():
@@ -56,6 +60,10 @@ async def seed_demo():
 
     prop_doc = {
         "name": "Dharamshala Heights",
+        "booking_slug": "dharamshala-heights",
+        "booking_website_enabled": True,
+        "booking_headline": "A mountain stay to remember",
+        "booking_description": "A boutique mountain retreat overlooking the Dhauladhar range, offering warm Himachali hospitality with modern comfort.",
         "logo": None,
         "address": "Naddi Road, McLeod Ganj",
         "city": "Dharamshala",
@@ -94,6 +102,7 @@ async def seed_demo():
         {"name": "Sunita Devi", "email": "frontdesk@dharamshalaheights.in", "password": "Frontdesk@123", "role": "front_desk"},
         {"name": "Ramesh Kumar", "email": "housekeeping@dharamshalaheights.in", "password": "House@123", "role": "housekeeping"},
         {"name": "Bhupender Rana", "email": "maintenance@dharamshalaheights.in", "password": "Maint@123", "role": "maintenance"},
+        {"name": "Accounts Team", "email": os.environ.get("DEMO_ACCOUNTS_EMAIL", "accounts@dharamshalaheights.in").lower(), "password": os.environ.get("DEMO_ACCOUNTS_PASSWORD", "Accounts@123"), "role": "accounts"},
     ]
     for u in users:
         await db.users.insert_one({
@@ -134,25 +143,29 @@ async def seed_demo():
         guest_ids.append(str(g.inserted_id))
 
     type_price = {tid: rt["base_price"] for tid, rt in zip(type_ids, ROOM_TYPES)}
+    type_capacity = {tid: rt["capacity"] for tid, rt in zip(type_ids, ROOM_TYPES)}
     today = date.today()
 
     async def make_res(guest_id, room_num, ci, co, status, source, paid_ratio):
         rid, tid = room_ids[room_num]
         nights = max((co - ci).days, 1)
         rate = type_price[tid]
-        total = rate * nights
+        room_charge = rate * nights
+        tax = round(room_charge * 12 / 100, 2)
+        total = round(room_charge + tax, 2)
         paid = round(total * paid_ratio, 2)
-        await db.reservations.insert_one({
+        reservation_result = await db.reservations.insert_one({
             "property_id": pid, "guest_id": guest_id, "room_id": rid, "room_type_id": tid,
-            "check_in": ci.isoformat(), "check_out": co.isoformat(), "num_guests": random.randint(1, 3),
+            "check_in": ci.isoformat(), "check_out": co.isoformat(), "num_guests": random.randint(1, type_capacity[tid]),
             "source": source, "special_requests": "", "notes": "", "status": status,
-            "nights": nights, "rate_per_night": rate, "total_amount": total, "paid_amount": paid,
+            "nights": nights, "rate_per_night": rate, "room_charge_amount": room_charge,
+            "tax_amount": tax, "total_amount": total, "paid_amount": paid,
             "created_by": "System", "created_at": now_utc().isoformat()})
         if status == "checked_in":
             await db.rooms.update_one({"_id": __import__("bson").ObjectId(rid)}, {"$set": {"status": "occupied"}})
         if paid > 0:
             await db.payments.insert_one({
-                "property_id": pid, "reservation_id": None, "guest_id": guest_id,
+                "property_id": pid, "reservation_id": str(reservation_result.inserted_id), "guest_id": guest_id,
                 "amount": paid, "method": random.choice(["upi", "cash", "card"]),
                 "reference": "", "status": "completed", "recorded_by": "System",
                 "created_at": now_utc().isoformat()})
@@ -196,20 +209,26 @@ async def seed_demo():
     await db.rooms.update_one({"property_id": pid, "number": "209"}, {"$set": {"status": "cleaning"}})
     await db.rooms.update_one({"property_id": pid, "number": "305"}, {"$set": {"status": "maintenance"}})
 
-    await write_credentials(users)
-
-
-async def write_credentials(users):
-    lines = ["# Test Credentials — HotelOS\n",
-             "\nAll accounts belong to the demo hotel **Dharamshala Heights**.\n",
-             "\n| Role | Email | Password |",
-             "\n|------|-------|----------|"]
-    for u in users:
-        lines.append(f"\n| {u['role']} | {u['email']} | {u['password']} |")
-    lines.append("\n\n## Auth endpoints\n")
-    lines.append("- POST /api/auth/login  (body: {email, password})\n")
-    lines.append("- POST /api/auth/logout\n")
-    lines.append("- GET  /api/auth/me\n")
-    lines.append("\nLogin sets httpOnly cookies (access_token, refresh_token).\n")
-    MEMORY.parent.mkdir(parents=True, exist_ok=True)
-    MEMORY.write_text("".join(lines))
+    housekeeping_user = await db.users.find_one({"property_id": pid, "role": "housekeeping"})
+    maintenance_user = await db.users.find_one({"property_id": pid, "role": "maintenance"})
+    now = now_utc().isoformat()
+    await db.housekeeping_tasks.insert_many([
+        {"property_id": pid, "room_id": room_ids["104"][0], "room_number": "104",
+         "task_type": "checkout_cleaning", "type": "checkout_cleaning", "priority": "high",
+         "status": "pending", "notes": "", "assigned_to": str(housekeeping_user["_id"]) if housekeeping_user else None,
+         "assigned_name": housekeeping_user.get("name") if housekeeping_user else None,
+         "created_at": now},
+        {"property_id": pid, "room_id": room_ids["209"][0], "room_number": "209",
+         "task_type": "stayover_cleaning", "type": "stayover_cleaning", "priority": "normal",
+         "status": "in_progress", "notes": "", "assigned_to": str(housekeeping_user["_id"]) if housekeeping_user else None,
+         "assigned_name": housekeeping_user.get("name") if housekeeping_user else None,
+         "created_at": now},
+    ])
+    await db.maintenance_issues.insert_one({
+        "property_id": pid, "room_id": room_ids["305"][0], "room_number": "305",
+        "title": "Air conditioner not cooling", "description": "Room AC needs inspection before next check-in.",
+        "priority": "high", "status": "open", "assigned_to": str(maintenance_user["_id"]) if maintenance_user else None,
+        "assigned_name": maintenance_user.get("name") if maintenance_user else None,
+        "reported_by": "System", "reported_by_id": None, "created_at": now,
+        "notes": [], "room_status_before_issue": "available",
+    })

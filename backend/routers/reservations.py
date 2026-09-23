@@ -3,8 +3,10 @@ from pydantic import BaseModel
 from typing import Optional, List
 from datetime import date
 
-from core import db, oid, serialize, now_utc, nights_between, date_ranges_overlap
+from core import (db, oid, serialize, now_utc, nights_between, date_ranges_overlap,
+                  claim_room_nights, release_room_nights)
 from security import require, get_current_user, log_action
+from notifications_service import notify_roles
 
 router = APIRouter(prefix="/reservations", tags=["reservations"])
 
@@ -39,8 +41,15 @@ async def _room_type_price(property_id, room_id):
     room = await db.rooms.find_one({"_id": oid(room_id), "property_id": property_id})
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
-    rt = await db.room_types.find_one({"_id": oid(room["room_type_id"])})
+    rt = await db.room_types.find_one({"_id": oid(room["room_type_id"]), "property_id": property_id})
     return room, (rt["base_price"] if rt else 0), (rt["name"] if rt else "—")
+
+
+async def _calculate_total(property_id, room_charge):
+    prop = await db.properties.find_one({"_id": oid(property_id)})
+    tax_percent = (prop or {}).get("payment_settings", {}).get("tax_percent", 0) or 0
+    tax = round(room_charge * tax_percent / 100, 2)
+    return tax, round(room_charge + tax, 2)
 
 
 async def _check_overlap(property_id, room_id, check_in, check_out, exclude_id=None):
@@ -64,6 +73,7 @@ async def _enrich(reservations, property_id):
         rm = rooms.get(s.get("room_id"))
         s["guest_name"] = g["name"] if g else s.get("guest_name", "—")
         s["guest_phone"] = g["phone"] if g else s.get("guest_phone", "")
+        s["guest_email"] = g.get("email", "") if g else s.get("guest_email", "")
         s["room_number"] = rm["number"] if rm else "—"
         s["balance"] = round(s.get("total_amount", 0) - s.get("paid_amount", 0), 2)
         out.append(s)
@@ -99,15 +109,22 @@ async def get_reservation(res_id: str, user: dict = Depends(require("bookings", 
     if not r:
         raise HTTPException(status_code=404, detail="Reservation not found")
     data = (await _enrich([r], user["property_id"]))[0]
-    payments = await db.payments.find({"reservation_id": res_id}).sort("created_at", -1).to_list(200)
+    payments = await db.payments.find({"property_id": user["property_id"], "reservation_id": res_id}).sort("created_at", -1).to_list(200)
     data["payments"] = [serialize(p) for p in payments]
     return data
 
 
 @router.post("")
 async def create_reservation(body: ReservationIn, user: dict = Depends(require("bookings", ["full"]))):
-    if body.check_out <= body.check_in:
+    try:
+        check_in = date.fromisoformat(body.check_in)
+        check_out = date.fromisoformat(body.check_out)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Check-in and check-out must be valid dates")
+    if check_out <= check_in:
         raise HTTPException(status_code=400, detail="Check-out must be after check-in")
+    if body.num_guests < 1:
+        raise HTTPException(status_code=400, detail="At least one guest is required")
     if body.source not in BOOKING_SOURCES:
         raise HTTPException(status_code=400, detail="Invalid booking source")
 
@@ -124,11 +141,19 @@ async def create_reservation(body: ReservationIn, user: dict = Depends(require("
                 "phone": body.guest_phone, "email": body.guest_email or "",
                 "created_at": now_utc().isoformat()})
             guest_id = str(gres.inserted_id)
+    elif not await db.guests.find_one({"_id": oid(guest_id), "property_id": user["property_id"]}):
+        raise HTTPException(status_code=404, detail="Guest not found")
 
     await _check_overlap(user["property_id"], body.room_id, body.check_in, body.check_out)
     room, price, rt_name = await _room_type_price(user["property_id"], body.room_id)
+    room_type = await db.room_types.find_one({"_id": oid(room["room_type_id"]), "property_id": user["property_id"]})
+    if body.num_guests > (room_type or {}).get("capacity", 2):
+        raise HTTPException(status_code=400, detail="Guest count exceeds room capacity")
+    if room.get("status") in ("maintenance", "out_of_order"):
+        raise HTTPException(status_code=400, detail="Room is unavailable for maintenance")
     nights = nights_between(body.check_in, body.check_out)
-    total = round(price * nights, 2)
+    room_charge = round(price * nights, 2)
+    tax, total = await _calculate_total(user["property_id"], room_charge)
 
     doc = {
         "property_id": user["property_id"],
@@ -144,13 +169,21 @@ async def create_reservation(body: ReservationIn, user: dict = Depends(require("
         "status": "confirmed",
         "nights": nights,
         "rate_per_night": price,
+        "room_charge_amount": room_charge,
+        "tax_amount": tax,
         "total_amount": total,
         "paid_amount": 0,
         "created_by": user["name"],
         "created_at": now_utc().isoformat(),
     }
     res = await db.reservations.insert_one(doc)
+    try:
+        await claim_room_nights(user["property_id"], body.room_id, body.check_in, body.check_out, str(res.inserted_id))
+    except ValueError as exc:
+        await db.reservations.delete_one({"_id": res.inserted_id, "property_id": user["property_id"]})
+        raise HTTPException(status_code=409, detail=str(exc))
     await log_action(user, "create_reservation", f"Booked room {room['number']} for {body.check_in} to {body.check_out}")
+    await notify_roles(user["property_id"], ["owner", "manager", "front_desk"], "reservation", "New reservation", f"Room {room['number']} · {body.check_in} to {body.check_out}", "/reservations")
     return (await _enrich([await db.reservations.find_one({"_id": res.inserted_id})], user["property_id"]))[0]
 
 
@@ -163,22 +196,54 @@ async def update_reservation(res_id: str, body: ReservationUpdate, user: dict = 
         raise HTTPException(status_code=400, detail="Cannot edit a completed or cancelled reservation")
 
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    if r["status"] == "checked_in" and any(key in updates for key in ("room_id", "check_in", "check_out")):
+        raise HTTPException(status_code=400, detail="Room and stay dates cannot be changed after check-in")
     new_room = updates.get("room_id", r["room_id"])
     new_in = updates.get("check_in", r["check_in"])
     new_out = updates.get("check_out", r["check_out"])
-    if new_out <= new_in:
+    validation_room = await db.rooms.find_one({"_id": oid(new_room), "property_id": user["property_id"]})
+    if not validation_room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    validation_type = await db.room_types.find_one({"_id": oid(validation_room["room_type_id"]), "property_id": user["property_id"]})
+    if updates.get("num_guests", r.get("num_guests", 1)) > (validation_type or {}).get("capacity", 2):
+        raise HTTPException(status_code=400, detail="Guest count exceeds room capacity")
+    try:
+        parsed_in = date.fromisoformat(new_in)
+        parsed_out = date.fromisoformat(new_out)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Check-in and check-out must be valid dates")
+    if parsed_out <= parsed_in:
         raise HTTPException(status_code=400, detail="Check-out must be after check-in")
     await _check_overlap(user["property_id"], new_room, new_in, new_out, exclude_id=res_id)
 
     if "room_id" in updates or "check_in" in updates or "check_out" in updates:
         room, price, _ = await _room_type_price(user["property_id"], new_room)
         nights = nights_between(new_in, new_out)
+        room_type = await db.room_types.find_one({"_id": oid(room["room_type_id"]), "property_id": user["property_id"]})
+        if updates.get("num_guests", r.get("num_guests", 1)) > (room_type or {}).get("capacity", 2):
+            raise HTTPException(status_code=400, detail="Guest count exceeds room capacity")
+        if room.get("status") in ("maintenance", "out_of_order"):
+            raise HTTPException(status_code=400, detail="Room is unavailable for maintenance")
+        room_charge = round(price * nights, 2)
+        tax, total = await _calculate_total(user["property_id"], room_charge)
+        if total < r.get("paid_amount", 0):
+            raise HTTPException(status_code=400, detail="Updated total cannot be lower than payments already recorded")
         updates["room_type_id"] = room["room_type_id"]
         updates["nights"] = nights
         updates["rate_per_night"] = price
-        updates["total_amount"] = round(price * nights, 2)
+        updates["room_charge_amount"] = room_charge
+        updates["tax_amount"] = tax
+        updates["total_amount"] = total
 
-    await db.reservations.update_one({"_id": r["_id"]}, {"$set": updates})
+    if any(key in updates for key in ("room_id", "check_in", "check_out")):
+        previous = {"room_id": r["room_id"], "check_in": r["check_in"], "check_out": r["check_out"]}
+        await release_room_nights(res_id)
+        try:
+            await claim_room_nights(user["property_id"], new_room, new_in, new_out, res_id)
+        except ValueError as exc:
+            await claim_room_nights(user["property_id"], previous["room_id"], previous["check_in"], previous["check_out"], res_id)
+            raise HTTPException(status_code=409, detail=str(exc))
+    await db.reservations.update_one({"_id": r["_id"], "property_id": user["property_id"]}, {"$set": updates})
     await log_action(user, "update_reservation", f"Edited reservation {res_id}")
     return await get_reservation(res_id, user)
 
@@ -190,7 +255,8 @@ async def cancel_reservation(res_id: str, user: dict = Depends(require("bookings
         raise HTTPException(status_code=404, detail="Reservation not found")
     if r["status"] == "checked_in":
         raise HTTPException(status_code=400, detail="Cannot cancel a checked-in guest")
-    await db.reservations.update_one({"_id": r["_id"]}, {"$set": {"status": "cancelled"}})
+    await db.reservations.update_one({"_id": r["_id"]}, {"$set": {"status": "cancelled", "cancelled_at": now_utc().isoformat()}})
+    await release_room_nights(res_id)
     await log_action(user, "cancel_reservation", f"Cancelled reservation {res_id}")
     return {"ok": True}
 
@@ -202,9 +268,14 @@ async def checkin(res_id: str, user: dict = Depends(require("bookings", ["full"]
         raise HTTPException(status_code=404, detail="Reservation not found")
     if r["status"] != "confirmed":
         raise HTTPException(status_code=400, detail=f"Cannot check in a reservation that is {r['status']}")
-    await db.reservations.update_one({"_id": r["_id"]}, {"$set": {
+    room = await db.rooms.find_one({"_id": oid(r["room_id"]), "property_id": user["property_id"]})
+    if not room or room.get("status") != "available":
+        raise HTTPException(status_code=400, detail="Assigned room is not ready for check-in")
+    checkin_update = await db.reservations.update_one({"_id": r["_id"], "status": "confirmed"}, {"$set": {
         "status": "checked_in", "actual_checkin": now_utc().isoformat()}})
-    await db.rooms.update_one({"_id": oid(r["room_id"])}, {"$set": {"status": "occupied"}})
+    if not checkin_update.modified_count:
+        raise HTTPException(status_code=409, detail="Reservation status changed. Refresh and try again.")
+    await db.rooms.update_one({"_id": room["_id"], "property_id": user["property_id"]}, {"$set": {"status": "occupied"}})
     await log_action(user, "checkin", f"Checked in reservation {res_id}")
     return await get_reservation(res_id, user)
 
@@ -216,19 +287,29 @@ async def checkout(res_id: str, user: dict = Depends(require("bookings", ["full"
         raise HTTPException(status_code=404, detail="Reservation not found")
     if r["status"] != "checked_in":
         raise HTTPException(status_code=400, detail="Only checked-in guests can be checked out")
-    await db.reservations.update_one({"_id": r["_id"]}, {"$set": {
+    checkout_update = await db.reservations.update_one({"_id": r["_id"], "property_id": user["property_id"], "status": "checked_in"}, {"$set": {
         "status": "checked_out", "actual_checkout": now_utc().isoformat()}})
-    room = await db.rooms.find_one({"_id": oid(r["room_id"])})
-    await db.rooms.update_one({"_id": oid(r["room_id"])}, {"$set": {"status": "dirty"}})
+    if not checkout_update.modified_count:
+        raise HTTPException(status_code=409, detail="Reservation status changed. Refresh and try again.")
+    room = await db.rooms.find_one({"_id": oid(r["room_id"]), "property_id": user["property_id"]})
+    await db.rooms.update_one({"_id": oid(r["room_id"]), "property_id": user["property_id"]}, {"$set": {"status": "dirty"}})
     # Create housekeeping task automatically
+    housekeeper = await db.users.find_one({"property_id": user["property_id"], "role": "housekeeping", "active": True})
     await db.housekeeping_tasks.insert_one({
         "property_id": user["property_id"],
         "room_id": r["room_id"],
         "room_number": room["number"] if room else "",
+        "task_type": "checkout_cleaning",
         "type": "checkout_cleaning",
         "priority": "high",
         "status": "pending",
+        "assigned_to": str(housekeeper["_id"]) if housekeeper else None,
+        "assigned_name": housekeeper.get("name") if housekeeper else None,
+        "created_by_id": user["id"],
+        "created_by": user["name"],
         "created_at": now_utc().isoformat(),
     })
+    recipient_roles = ["owner", "manager", "housekeeping"] if housekeeper else ["owner", "manager"]
+    await notify_roles(user["property_id"], recipient_roles, "housekeeping", "Room needs cleaning", f"Room {room['number'] if room else ''} checked out and is ready for cleaning.", "/housekeeping")
     await log_action(user, "checkout", f"Checked out reservation {res_id}, room {room['number'] if room else ''} -> dirty")
     return await get_reservation(res_id, user)

@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { BedDouble, Plus, Loader2 } from "lucide-react";
@@ -93,6 +94,8 @@ export default function Rooms() {
   const { user } = useAuth();
   const qc = useQueryClient();
   const [filter, setFilter] = useState("");
+  const [searchParams] = useSearchParams();
+  const focusedRoomId = searchParams.get("room");
   const canManage = ["owner", "manager"].includes(user.role);
 
   const { data: rooms = [], isLoading } = useQuery({ queryKey: ["rooms"], queryFn: async () => (await api.get("/rooms")).data });
@@ -105,7 +108,7 @@ export default function Rooms() {
   });
 
   const counts = STATUSES.reduce((a, s) => ({ ...a, [s]: rooms.filter((r) => r.status === s).length }), {});
-  const shown = filter ? rooms.filter((r) => r.status === filter) : rooms;
+  const shown = rooms.filter((room) => (!filter || room.status === filter) && (!focusedRoomId || room.id === focusedRoomId));
 
   return (
     <div className="space-y-6">
@@ -138,10 +141,10 @@ export default function Rooms() {
               </div>
               <div className="text-xs text-muted-foreground">{inr(room.base_price)}/night</div>
               <RoomStatusBadge status={room.status} />
-              <Select value={room.status} onValueChange={(v) => setStatus.mutate({ id: room.id, status: v })}>
+              {canManage && <Select value={room.status} onValueChange={(v) => setStatus.mutate({ id: room.id, status: v })}>
                 <SelectTrigger className="h-8 text-xs" data-testid={`room-status-${room.number}`}><SelectValue /></SelectTrigger>
                 <SelectContent>{STATUSES.map((s) => <SelectItem key={s} value={s}>{ROOM_STATUS[s].label}</SelectItem>)}</SelectContent>
-              </Select>
+              </Select>}
             </Card>
           ))}
         </div>

@@ -24,13 +24,14 @@ const roleBadge = {
   front_desk: "bg-teal-100 text-teal-800",
   housekeeping: "bg-purple-100 text-purple-800",
   maintenance: "bg-amber-100 text-amber-800",
+  accounts: "bg-emerald-100 text-emerald-800",
 };
 
 function AddStaffDialog({ isOwner }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [f, setF] = useState({ name: "", email: "", password: "", role: "front_desk", phone: "" });
-  const roles = isOwner ? ["manager", "front_desk", "housekeeping", "maintenance"] : ["front_desk", "housekeeping", "maintenance"];
+  const roles = isOwner ? ["manager", "front_desk", "housekeeping", "maintenance", "accounts"] : ["front_desk", "housekeeping", "maintenance", "accounts"];
   const create = useMutation({
     mutationFn: async (b) => (await api.post("/staff", b)).data,
     onSuccess: () => { toast.success("Staff member added"); qc.invalidateQueries({ queryKey: ["staff"] }); setOpen(false); setF({ name: "", email: "", password: "", role: "front_desk", phone: "" }); },
@@ -45,7 +46,7 @@ function AddStaffDialog({ isOwner }) {
         <div className="space-y-3">
           <div className="space-y-1.5"><Label>Name</Label><Input data-testid="staff-name-input" value={f.name} onChange={set("name")} /></div>
           <div className="space-y-1.5"><Label>Email</Label><Input data-testid="staff-email-input" type="email" value={f.email} onChange={set("email")} /></div>
-          <div className="space-y-1.5"><Label>Password</Label><Input data-testid="staff-password-input" type="text" value={f.password} onChange={set("password")} /></div>
+          <div className="space-y-1.5"><Label>Password</Label><Input data-testid="staff-password-input" type="password" minLength={12} value={f.password} onChange={set("password")} /></div>
           <div className="space-y-1.5">
             <Label>Role</Label>
             <Select value={f.role} onValueChange={(v) => setF({ ...f, role: v })}>

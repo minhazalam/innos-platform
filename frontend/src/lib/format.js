@@ -61,4 +61,5 @@ export const ROLE_LABELS = {
   front_desk: "Front Desk",
   housekeeping: "Housekeeping",
   maintenance: "Maintenance",
+  accounts: "Accounts",
 };

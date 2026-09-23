@@ -48,7 +48,7 @@ async def get_guest(guest_id: str, user: dict = Depends(require("guests", ["full
     if not guest:
         raise HTTPException(status_code=404, detail="Guest not found")
     g = serialize(guest)
-    reservations = await db.reservations.find({"guest_id": guest_id}).sort("check_in", -1).to_list(200)
+    reservations = await db.reservations.find({"property_id": user["property_id"], "guest_id": guest_id}).sort("check_in", -1).to_list(200)
     rooms = {str(r["_id"]): r for r in await db.rooms.find({"property_id": user["property_id"]}).to_list(500)}
     stays = []
     total_spend = 0
@@ -60,7 +60,8 @@ async def get_guest(guest_id: str, user: dict = Depends(require("guests", ["full
         total_spend += r.get("paid_amount", 0)
     g["stays"] = stays
     g["total_bookings"] = len(stays)
-    g["total_spend"] = total_spend
+    if user["role"] != "front_desk":
+        g["total_spend"] = total_spend
     return g
 
 

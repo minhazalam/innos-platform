@@ -82,7 +82,7 @@ export default function Dashboard() {
       </motion.div>
 
       {/* Stat cards */}
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-6">
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 2xl:grid-cols-6">
         <StatCard delay={0.02} icon={TrendingUp} label="Occupancy" value={`${data.occupancy_pct}%`} sub={`${data.occupied_rooms}/${data.total_rooms} rooms`} accent="bg-primary/10 text-primary" />
         {canRevenue && <StatCard delay={0.04} icon={IndianRupee} label="Revenue Today" value={inr(data.today_revenue)} accent="bg-emerald-100 text-emerald-700" />}
         <StatCard delay={0.06} icon={LogIn} label="Arrivals" value={data.arrivals_count} sub="today" accent="bg-blue-100 text-blue-700" />

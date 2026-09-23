@@ -48,7 +48,7 @@ export default function Calendar() {
       </PageHeader>
 
       <Card className="overflow-hidden rounded-2xl border-border p-0">
-        <div className="overflow-x-auto hotelos-scroll">
+        <div className="overflow-x-auto innos-scroll">
           <div className="min-w-[900px]">
             {/* Header */}
             <div className="grid border-b border-border bg-muted/40" style={{ gridTemplateColumns: `120px repeat(${DAYS}, 1fr)` }}>

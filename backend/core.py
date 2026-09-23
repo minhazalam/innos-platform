@@ -6,8 +6,9 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
 from motor.motor_asyncio import AsyncIOMotorClient
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from bson import ObjectId
+from pymongo.errors import DuplicateKeyError
 
 mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
@@ -52,3 +53,45 @@ def nights_between(check_in: str, check_out: str) -> int:
 
 def date_ranges_overlap(a_in: str, a_out: str, b_in: str, b_out: str) -> bool:
     return not (a_out <= b_in or a_in >= b_out)
+
+
+async def claim_room_nights(property_id: str, room_id: str, check_in: str, check_out: str, reservation_id: str):
+    """Atomically claim every occupied night using a unique inventory index."""
+    first = date.fromisoformat(check_in)
+    last = date.fromisoformat(check_out)
+    locks = []
+    current = first
+    while current < last:
+        locks.append({
+            "property_id": property_id, "room_id": room_id,
+            "night": current.isoformat(), "reservation_id": reservation_id,
+        })
+        current += timedelta(days=1)
+    if not locks:
+        raise ValueError("Reservation must include at least one night")
+    newly_claimed = []
+    for lock in locks:
+        unique = {key: lock[key] for key in ("property_id", "room_id", "night")}
+        try:
+            await db.room_inventory_locks.insert_one(lock)
+            newly_claimed.append(lock["night"])
+        except DuplicateKeyError as exc:
+            existing = await db.room_inventory_locks.find_one(unique)
+            if existing and existing.get("reservation_id") == reservation_id:
+                continue
+            if newly_claimed:
+                await db.room_inventory_locks.delete_many({
+                    **unique, "night": {"$in": newly_claimed}, "reservation_id": reservation_id,
+                })
+            raise ValueError("Room is no longer available for the selected dates") from exc
+        except Exception:
+            if newly_claimed:
+                await db.room_inventory_locks.delete_many({
+                    "property_id": property_id, "room_id": room_id,
+                    "night": {"$in": newly_claimed}, "reservation_id": reservation_id,
+                })
+            raise
+
+
+async def release_room_nights(reservation_id: str):
+    await db.room_inventory_locks.delete_many({"reservation_id": reservation_id})

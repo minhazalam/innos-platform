@@ -44,15 +44,21 @@ def create_refresh_token(user_id: str) -> str:
 
 
 def set_auth_cookies(response, access_token: str, refresh_token: str):
-    response.set_cookie("access_token", access_token, httponly=True, secure=True,
-                        samesite="none", max_age=43200, path="/")
-    response.set_cookie("refresh_token", refresh_token, httponly=True, secure=True,
-                        samesite="none", max_age=604800, path="/")
+    frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+    secure = os.environ.get("COOKIE_SECURE", "").lower() in ("1", "true", "yes") or frontend_url.startswith("https://")
+    same_site = os.environ.get("COOKIE_SAMESITE", "none" if secure else "lax").lower()
+    response.set_cookie("access_token", access_token, httponly=True, secure=secure,
+                        samesite=same_site, max_age=43200, path="/")
+    response.set_cookie("refresh_token", refresh_token, httponly=True, secure=secure,
+                        samesite=same_site, max_age=604800, path="/")
 
 
 def clear_auth_cookies(response):
-    response.delete_cookie("access_token", path="/")
-    response.delete_cookie("refresh_token", path="/")
+    frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+    secure = os.environ.get("COOKIE_SECURE", "").lower() in ("1", "true", "yes") or frontend_url.startswith("https://")
+    same_site = os.environ.get("COOKIE_SAMESITE", "none" if secure else "lax").lower()
+    response.delete_cookie("access_token", path="/", secure=secure, httponly=True, samesite=same_site)
+    response.delete_cookie("refresh_token", path="/", secure=secure, httponly=True, samesite=same_site)
 
 
 async def get_current_user(request: Request) -> dict:
@@ -88,14 +94,18 @@ ROLE_PERMISSIONS = {
         "guests": "full", "payments": "full", "invoice": "yes", "rooms": "full",
         "housekeeping": "full", "maintenance": "full", "guest_requests": "full",
         "staff": "full", "settings": "full", "ai": "full", "payment_settings": "full",
-        "booking_website": "full",
+        "booking_website": "full", "audit": "full",
     },
     "manager": {
         "dashboard": "operational", "revenue": "basic", "analytics": "basic", "bookings": "full",
         "guests": "full", "payments": "full", "invoice": "yes", "rooms": "full",
         "housekeeping": "full", "maintenance": "full", "guest_requests": "full",
         "staff": "limited", "settings": "limited", "ai": "full", "payment_settings": "no",
-        "booking_website": "limited",
+        "booking_website": "limited", "audit": "limited",
+    },
+    "accounts": {
+        "dashboard": "accounts", "revenue": "full", "analytics": "basic",
+        "payments": "accounts",
     },
     "front_desk": {
         "dashboard": "front_desk", "revenue": "no", "analytics": "no", "bookings": "full",
@@ -110,6 +120,7 @@ ROLE_PERMISSIONS = {
     },
     "maintenance": {
         "dashboard": "own", "rooms": "assigned", "maintenance": "own",
+        "guest_requests": "relevant",
     },
 }
 

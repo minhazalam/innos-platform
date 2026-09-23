@@ -1,8 +1,10 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Users, Search, Plus, Phone, Mail, Loader2 } from "lucide-react";
 import api, { apiError } from "@/lib/api";
+import { useAuth } from "@/context/AuthContext";
 import { inr, fmtDate } from "@/lib/format";
 import { PageHeader, EmptyState, ResStatusBadge } from "@/components/Shared";
 import { Card } from "@/components/ui/card";
@@ -47,13 +49,13 @@ function AddGuestDialog() {
   );
 }
 
-function GuestDetail({ id, open, onClose }) {
+function GuestDetail({ id, open, onClose, canViewSpend }) {
   const { data: g, isLoading } = useQuery({
     queryKey: ["guest", id], queryFn: async () => (await api.get(`/guests/${id}`)).data, enabled: !!id && open,
   });
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto hotelos-scroll sm:max-w-lg" data-testid="guest-detail-dialog">
+      <DialogContent className="max-h-[90vh] overflow-y-auto innos-scroll sm:max-w-lg" data-testid="guest-detail-dialog">
         {isLoading || !g ? <div className="flex h-40 items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-primary" /></div> : (
           <>
             <DialogHeader><DialogTitle className="font-display text-xl">{g.name}</DialogTitle></DialogHeader>
@@ -61,9 +63,9 @@ function GuestDetail({ id, open, onClose }) {
               <span className="flex items-center gap-1.5"><Phone className="h-4 w-4" /> {g.phone}</span>
               {g.email && <span className="flex items-center gap-1.5"><Mail className="h-4 w-4" /> {g.email}</span>}
             </div>
-            <div className="grid grid-cols-3 gap-3">
+            <div className={`grid ${canViewSpend ? "grid-cols-3" : "grid-cols-2"} gap-3`}>
               <Card className="rounded-xl p-3 text-center"><div className="font-display text-2xl font-bold">{g.total_bookings}</div><div className="text-xs text-muted-foreground">Bookings</div></Card>
-              <Card className="rounded-xl p-3 text-center"><div className="font-display text-2xl font-bold text-emerald-600">{inr(g.total_spend)}</div><div className="text-xs text-muted-foreground">Total Spend</div></Card>
+              {canViewSpend && <Card className="rounded-xl p-3 text-center"><div className="font-display text-2xl font-bold text-emerald-600">{inr(g.total_spend)}</div><div className="text-xs text-muted-foreground">Total Spend</div></Card>}
               <Card className="rounded-xl p-3 text-center"><div className="font-display text-2xl font-bold">{g.stays.filter((s) => s.status === "checked_in").length}</div><div className="text-xs text-muted-foreground">In-house</div></Card>
             </div>
             {g.preferences && <div className="rounded-lg bg-muted/50 p-3 text-sm"><span className="font-medium">Preferences: </span>{g.preferences}</div>}
@@ -73,7 +75,7 @@ function GuestDetail({ id, open, onClose }) {
                 {g.stays.length === 0 ? <p className="text-sm text-muted-foreground">No stays yet.</p> : g.stays.map((s) => (
                   <div key={s.id} className="flex items-center justify-between rounded-lg border border-border px-3 py-2 text-sm">
                     <div><div className="font-medium">Room {s.room_number}</div><div className="text-xs text-muted-foreground">{fmtDate(s.check_in)} → {fmtDate(s.check_out)}</div></div>
-                    <div className="flex items-center gap-3"><span>{inr(s.total_amount)}</span><ResStatusBadge status={s.status} /></div>
+                    <div className="flex items-center gap-3">{canViewSpend && <span>{inr(s.total_amount)}</span>}<ResStatusBadge status={s.status} /></div>
                   </div>
                 ))}
               </div>
@@ -86,8 +88,12 @@ function GuestDetail({ id, open, onClose }) {
 }
 
 export default function Guests() {
+  const { user } = useAuth();
   const [q, setQ] = useState("");
   const [openId, setOpenId] = useState(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const guestIdFromSearch = searchParams.get("guest");
+  useEffect(() => { if (guestIdFromSearch) setOpenId(guestIdFromSearch); }, [guestIdFromSearch]);
   const { data = [], isLoading } = useQuery({
     queryKey: ["guests", q], queryFn: async () => (await api.get(`/guests${q ? `?search=${encodeURIComponent(q)}` : ""}`)).data,
   });
@@ -122,7 +128,7 @@ export default function Guests() {
         </div>
       )}
 
-      {openId && <GuestDetail id={openId} open={!!openId} onClose={() => setOpenId(null)} />}
+      {openId && <GuestDetail id={openId} open={!!openId} canViewSpend={user.role !== "front_desk"} onClose={() => { setOpenId(null); if (searchParams.has("guest")) setSearchParams({}); }} />}
     </div>
   );
 }

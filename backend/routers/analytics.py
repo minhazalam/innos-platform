@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from core import db
 from security import require
+from finance import payment_cash_flow
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
@@ -46,7 +47,7 @@ async def summary(period: str = "week", user: dict = Depends(require("analytics"
     }).to_list(5000)
     collected = 0.0
     for payment in payments:
-        amount = payment.get("amount", 0) * (-1 if payment.get("status") == "refunded" else 1)
+        amount = payment_cash_flow(payment)
         collected += amount
         day = str(payment.get("created_at", ""))[:10]
         if day in daily:

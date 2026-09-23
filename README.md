@@ -120,6 +120,8 @@ Open `http://localhost:3000`. To inspect logs, use `docker compose logs -f front
 
 The Compose setup does not seed demo data by default. To use sample data, set `SEED_DEMO=true` in `.env` before starting the stack. The frontend proxies `/api` requests to the API container, so browser requests and session cookies stay on the same origin. For an HTTPS deployment, set `FRONTEND_URL` to the public frontend origin and `COOKIE_SECURE=true`, terminate TLS at a trusted reverse proxy, and use persistent protected secrets and backups.
 
+The Compose file can also run the published GitHub Container Registry images. Authenticate to GHCR if the packages are private, set `INNOS_IMAGE_TAG` to `latest` or a release tag, then run `docker compose pull && docker compose up -d --no-build`. The CI workflow publishes images on pushes to `main` and version tags; it does not deploy to a server because no hosting environment is configured.
+
 ## Optional AI provider
 
 Without provider credentials, AI Manager uses a deterministic local response for common operational questions. To enable open-ended, read-only answers using an OpenAI-compatible chat completions API, set these values in `backend/.env` (or the root `.env` for Compose):
@@ -158,3 +160,5 @@ cd frontend && corepack yarn build
 ```
 
 These checks compile the Python modules and build the React application. They do not verify provider integrations or production readiness.
+
+The CI workflow runs backend unit checks and frontend production builds for pull requests to `main` or `dev`. Successful pushes to `main` and version tags also publish the backend and web images to GHCR.

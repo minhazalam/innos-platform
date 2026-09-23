@@ -3,6 +3,7 @@ from datetime import date, timedelta
 
 from core import db, serialize, now_utc, oid
 from security import require, get_current_user, get_level
+from finance import sum_payment_cash_flow
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -14,8 +15,7 @@ async def summary(user: dict = Depends(require("dashboard"))):
     role = user["role"]
 
     if role == "accounts":
-        payments = await db.payments.find({"property_id": pid, "status": "completed"}).to_list(5000)
-        refunds_today = await db.payments.find({"property_id": pid, "status": "refunded"}).to_list(2000)
+        payments = await db.payments.find({"property_id": pid, "status": {"$in": ["completed", "refunded"]}}).to_list(5000)
         reservations = await db.reservations.find({
             "property_id": pid, "status": {"$in": ["confirmed", "checked_in"]},
         }, {"total_amount": 1, "paid_amount": 1}).to_list(5000)
@@ -23,10 +23,8 @@ async def summary(user: dict = Depends(require("dashboard"))):
         pending = [max(0, round(r.get("total_amount", 0) - r.get("paid_amount", 0), 2)) for r in reservations]
         return {
             "accounts_mode": True,
-            "today_revenue": round(
-                sum(p.get("amount", 0) for p in payments if str(p.get("created_at", ""))[:10] == today)
-                - sum(p.get("amount", 0) for p in refunds_today if str(p.get("created_at", ""))[:10] == today), 2),
-            "period_revenue": round(sum(p.get("amount", 0) - p.get("refunded_amount", 0) for p in payments), 2),
+            "today_revenue": sum_payment_cash_flow(payments, day=date.today()),
+            "period_revenue": sum_payment_cash_flow(payments),
             "pending_amount": round(sum(pending), 2),
             "pending_payments_count": sum(1 for amount in pending if amount > 0),
             "recent_reconciliations": [serialize(run) for run in runs],
@@ -106,10 +104,7 @@ async def summary(user: dict = Depends(require("dashboard"))):
 
     if can_revenue:
         payments = await db.payments.find({"property_id": pid, "status": {"$in": ["completed", "refunded"]}}).to_list(5000)
-        today_revenue = sum(
-            p.get("amount", 0) * (-1 if p.get("status") == "refunded" else 1)
-            for p in payments if str(p.get("created_at", ""))[:10] == today
-        )
+        today_revenue = sum_payment_cash_flow(payments, day=date.today())
         pending_amount = sum(r["balance"] for r in pending)
         result["today_revenue"] = round(today_revenue, 2)
         result["pending_amount"] = round(pending_amount, 2)

@@ -95,3 +95,23 @@ async def claim_room_nights(property_id: str, room_id: str, check_in: str, check
 
 async def release_room_nights(reservation_id: str):
     await db.room_inventory_locks.delete_many({"reservation_id": reservation_id})
+
+
+async def sync_room_nights(property_id: str, room_id: str, check_in: str, check_out: str, reservation_id: str):
+    """Ensure an active reservation owns exactly the nights in its saved stay."""
+    first = date.fromisoformat(check_in)
+    last = date.fromisoformat(check_out)
+    nights = []
+    current = first
+    while current < last:
+        nights.append(current.isoformat())
+        current += timedelta(days=1)
+    if not nights:
+        raise ValueError("Reservation must include at least one night")
+    # Claim the current range before dropping stale nights. If claiming fails,
+    # the previously persisted inventory remains protected.
+    await claim_room_nights(property_id, room_id, check_in, check_out, reservation_id)
+    await db.room_inventory_locks.delete_many({
+        "reservation_id": reservation_id,
+        "$nor": [{"room_id": room_id, "night": {"$in": nights}}],
+    })

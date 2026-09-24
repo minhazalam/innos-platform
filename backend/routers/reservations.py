@@ -4,7 +4,7 @@ from typing import Optional, List
 from datetime import date
 
 from core import (db, oid, serialize, now_utc, nights_between, date_ranges_overlap,
-                  claim_room_nights, release_room_nights)
+                  claim_room_nights, release_room_nights, sync_room_nights)
 from security import require, get_current_user, log_action
 from notifications_service import notify_roles
 
@@ -235,15 +235,35 @@ async def update_reservation(res_id: str, body: ReservationUpdate, user: dict = 
         updates["tax_amount"] = tax
         updates["total_amount"] = total
 
-    if any(key in updates for key in ("room_id", "check_in", "check_out")):
-        previous = {"room_id": r["room_id"], "check_in": r["check_in"], "check_out": r["check_out"]}
-        await release_room_nights(res_id)
+    inventory_changed = any(key in updates for key in ("room_id", "check_in", "check_out"))
+    if inventory_changed:
         try:
+            # Keep the old inventory locked until the new dates have been
+            # claimed and the reservation update succeeds.
             await claim_room_nights(user["property_id"], new_room, new_in, new_out, res_id)
         except ValueError as exc:
-            await claim_room_nights(user["property_id"], previous["room_id"], previous["check_in"], previous["check_out"], res_id)
             raise HTTPException(status_code=409, detail=str(exc))
-    await db.reservations.update_one({"_id": r["_id"], "property_id": user["property_id"]}, {"$set": updates})
+
+    updates["updated_at"] = now_utc().isoformat()
+    result = await db.reservations.update_one({
+        "_id": r["_id"], "property_id": user["property_id"],
+        "room_id": r["room_id"], "check_in": r["check_in"],
+        "check_out": r["check_out"], "status": r["status"],
+    }, {"$set": updates})
+    if not result.matched_count:
+        latest = await db.reservations.find_one({"_id": r["_id"], "property_id": user["property_id"]})
+        if latest and latest.get("status") in ACTIVE_STATUSES:
+            try:
+                await sync_room_nights(user["property_id"], latest["room_id"], latest["check_in"], latest["check_out"], res_id)
+            except ValueError:
+                # Preserve all extant locks if reconciliation detects another
+                # reservation conflict; never make occupied inventory appear free.
+                pass
+        else:
+            await release_room_nights(res_id)
+        raise HTTPException(status_code=409, detail="Reservation changed. Refresh and try again.")
+    if inventory_changed:
+        await sync_room_nights(user["property_id"], new_room, new_in, new_out, res_id)
     await log_action(user, "update_reservation", f"Edited reservation {res_id}")
     return await get_reservation(res_id, user)
 

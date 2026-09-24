@@ -70,8 +70,30 @@ async def summary(user: dict = Depends(require("dashboard"))):
     maintenance_rooms = [r for r in rooms if r.get("status") in ("maintenance", "out_of_order")]
 
     reservations = await db.reservations.find({"property_id": pid}).to_list(2000)
+    open_housekeeping = await db.housekeeping_tasks.find({
+        "property_id": pid, "status": {"$in": ["pending", "in_progress"]},
+    }).sort("created_at", 1).to_list(1000)
+    open_issues = await db.maintenance_issues.find({
+        "property_id": pid, "status": {"$in": ["open", "in_progress"]},
+    }).sort("created_at", -1).to_list(1000)
+    open_requests = await db.guest_requests.find({
+        "property_id": pid, "status": {"$in": ["created", "assigned", "in_progress"]},
+    }).sort("created_at", -1).to_list(1000)
+    priority_rank = {"critical": 0, "urgent": 0, "high": 1, "normal": 2, "low": 3}
+    open_housekeeping.sort(key=lambda item: (priority_rank.get(item.get("priority", "normal"), 2), str(item.get("created_at") or "")))
+    open_issues.sort(key=lambda item: (priority_rank.get(item.get("priority", "normal"), 2), str(item.get("created_at") or "")))
+    open_requests.sort(key=lambda item: (priority_rank.get(item.get("priority", "normal"), 2), str(item.get("created_at") or "")))
     guests = {str(g["_id"]): g for g in await db.guests.find({"property_id": pid}).to_list(2000)}
     rooms_map = {str(r["_id"]): r for r in rooms}
+
+    def room_number(item):
+        room = rooms_map.get(str(item.get("room_id")))
+        return item.get("room_number") or (room.get("number") if room else None) or "—"
+
+    def shape_work_item(item, fields):
+        shaped = serialize(item)
+        shaped["room_number"] = room_number(item)
+        return {key: shaped.get(key) for key in fields}
 
     def enrich(r):
         s = serialize(r)
@@ -99,6 +121,12 @@ async def summary(user: dict = Depends(require("dashboard"))):
         "departures": departures,
         "rooms_need_cleaning": [serialize(r) for r in dirty],
         "maintenance_rooms": [serialize(r) for r in maintenance_rooms],
+        "open_housekeeping_count": len(open_housekeeping),
+        "open_housekeeping_tasks": [shape_work_item(task, ("id", "room_number", "task_type", "type", "priority", "status", "created_at")) for task in open_housekeeping[:8]],
+        "open_maintenance_count": len(open_issues),
+        "open_maintenance_issues": [shape_work_item(issue, ("id", "room_number", "title", "priority", "status", "created_at")) for issue in open_issues[:8]],
+        "open_guest_request_count": len(open_requests),
+        "open_guest_requests": [shape_work_item(request, ("id", "room_number", "category", "description", "priority", "status", "created_at")) for request in open_requests[:8]],
         "pending_payments_count": len(pending),
         "arrivals_count": len(arrivals),
         "departures_count": len(departures),
@@ -113,5 +141,8 @@ async def summary(user: dict = Depends(require("dashboard"))):
         pending_amount = sum(r["balance"] for r in pending)
         result["today_revenue"] = round(today_revenue, 2)
         result["pending_amount"] = round(pending_amount, 2)
-        result["pending_payments"] = pending
+        result["pending_payments"] = [
+            {key: item.get(key) for key in ("id", "guest_name", "room_number", "balance", "check_out")}
+            for item in pending[:8]
+        ]
     return result

@@ -75,11 +75,15 @@ def _fallback_answer(question: str, context: dict, role: str):
             return "Revenue insights are available to owner and manager roles."
         return f"Payments recorded today total ₹{context['today_collected_revenue']:,.2f}. There are {context['pending_payment_count']} reservations with a balance due."
     if any(word in q for word in ("attention", "issue", "clean", "task", "today", "doing")):
-        return (f"Today: {rooms['occupied']} of {rooms['total']} rooms occupied, "
+        answer = (f"Today: {rooms['occupied']} of {rooms['total']} rooms occupied, "
                 f"{len(context['arrivals'])} arrivals, {len(context['departures'])} departures, "
                 f"{context['open_housekeeping_tasks']} open housekeeping tasks, "
                 f"{len(context['open_maintenance_issues'])} open maintenance issues and "
                 f"{context['open_guest_requests']} open guest requests.")
+        if role in ("owner", "manager"):
+            answer += (f" There are {context['pending_payment_count']} reservations with a balance due "
+                       f"(₹{context['pending_balance']:,.2f} total).")
+        return answer
     return "I can answer current occupancy, arrivals, departures, pending payments and operational issues from Innos data. For open-ended questions, configure an AI provider in the backend environment."
 
 
@@ -129,3 +133,37 @@ async def ask(body: QuestionIn, user: dict = Depends(require("ai", ["full", "lim
     return {"answer": answer, "provider_configured": configured,
             "provider_used": provider_used,
             "provider_error": provider_error, "facts": context}
+
+
+@router.get("/briefing")
+async def daily_briefing(user: dict = Depends(require("ai", ["full", "limited"]))):
+    """Return a daily operational briefing grounded in the current property data."""
+    context = await _hotel_context(user)
+    question = (
+        "Write a concise daily hotel operations briefing. Prioritize actionable "
+        "housekeeping, maintenance, guest request, arrival/departure and payment "
+        "exceptions. Include only relevant values from the supplied facts. Do not "
+        "invent causes, guest details, prices, policies, or actions taken."
+    )
+    configured = bool(
+        os.environ.get("AI_API_KEY") and os.environ.get("AI_MODEL")
+        and os.environ.get("AI_PROVIDER", "disabled").lower() in ("openai_compatible", "openai-compatible")
+    )
+    provider_error = False
+    answer = None
+    provider_used = False
+    if configured:
+        try:
+            answer = await _ask_provider(question, context)
+            provider_used = bool(answer)
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError):
+            provider_error = True
+    if not answer:
+        answer = _fallback_answer("What needs my attention today?", context, user["role"])
+    return {
+        "answer": answer,
+        "provider_configured": configured,
+        "provider_used": provider_used,
+        "provider_error": provider_error,
+        "facts": context,
+    }

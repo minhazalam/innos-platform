@@ -312,7 +312,13 @@ async def checkout(res_id: str, user: dict = Depends(require("bookings", ["full"
     if not checkout_update.modified_count:
         raise HTTPException(status_code=409, detail="Reservation status changed. Refresh and try again.")
     room = await db.rooms.find_one({"_id": oid(r["room_id"]), "property_id": user["property_id"]})
-    await db.rooms.update_one({"_id": oid(r["room_id"]), "property_id": user["property_id"]}, {"$set": {"status": "dirty"}})
+    active_issue = await db.maintenance_issues.find_one({
+        "property_id": user["property_id"], "room_id": r["room_id"],
+        "status": {"$in": ["open", "in_progress"]},
+    })
+    await db.rooms.update_one({"_id": oid(r["room_id"]), "property_id": user["property_id"]}, {
+        "$set": {"status": "maintenance" if active_issue else "dirty"},
+    })
     # Create housekeeping task automatically
     housekeeper = await db.users.find_one({"property_id": user["property_id"], "role": "housekeeping", "active": True})
     await db.housekeeping_tasks.insert_one({

@@ -75,6 +75,16 @@ async def create_issue(body: IssueIn, user: dict = Depends(require("maintenance"
             raise HTTPException(status_code=404, detail="Room not found")
         room_id = str(matched_room["_id"])
     room = await _validate_room(user["property_id"], room_id)
+    room_status_before_issue = room.get("status") if room else None
+    if room:
+        existing_issue = await db.maintenance_issues.find_one({
+            "property_id": user["property_id"], "room_id": str(room["_id"]),
+            "status": {"$in": ["open", "in_progress"]},
+        }, sort=[("created_at", 1)])
+        if existing_issue:
+            # All concurrent issues keep the original room state so resolving
+            # the final issue can restore a meaningful readiness state.
+            room_status_before_issue = existing_issue.get("room_status_before_issue", room_status_before_issue)
     assignee = None
     if body.assigned_to and user["role"] in ("owner", "manager"):
         assignee = await _assignee(user["property_id"], body.assigned_to)
@@ -90,7 +100,7 @@ async def create_issue(body: IssueIn, user: dict = Depends(require("maintenance"
         "assigned_name": assignee["name"] if assignee else None,
         "reported_by_id": user["id"], "reported_by": user["name"],
         "created_at": now_utc().isoformat(), "notes": [],
-        "room_status_before_issue": room.get("status") if room else None,
+        "room_status_before_issue": room_status_before_issue,
     }
     result = await db.maintenance_issues.insert_one(issue)
     if room and room.get("status") != "occupied":
@@ -138,14 +148,24 @@ async def update_issue(issue_id: str, body: IssueUpdate, user: dict = Depends(re
         update_doc["$push"] = updates["$push"]
     await db.maintenance_issues.update_one({"_id": issue["_id"]}, update_doc)
     if body.status == "resolved" and issue.get("room_id"):
-        active_task = await db.housekeeping_tasks.find_one({"property_id": user["property_id"], "room_id": issue["room_id"], "status": {"$in": ["pending", "in_progress"]}})
         open_issue = await db.maintenance_issues.find_one({
             "_id": {"$ne": issue["_id"]}, "property_id": user["property_id"],
             "room_id": issue["room_id"], "status": {"$in": ["open", "in_progress"]},
         })
+        active_tasks = await db.housekeeping_tasks.find({
+            "property_id": user["property_id"], "room_id": issue["room_id"],
+            "status": {"$in": ["pending", "in_progress"]},
+        }).to_list(100)
         current_room = await db.rooms.find_one({"_id": oid(issue["room_id"]), "property_id": user["property_id"]})
         if current_room and current_room.get("status") != "occupied":
-            restore_status = "maintenance" if open_issue else "dirty" if active_task else (issue.get("room_status_before_issue") or "available")
+            previous_status = issue.get("room_status_before_issue")
+            restore_status = (
+                "maintenance" if open_issue else
+                "out_of_order" if current_room.get("status") == "out_of_order" or previous_status == "out_of_order" else
+                "cleaning" if any(task.get("status") == "in_progress" for task in active_tasks) else
+                "dirty" if active_tasks or previous_status in ("dirty", "cleaning", "occupied") else
+                "available"
+            )
             await db.rooms.update_one({"_id": current_room["_id"], "property_id": user["property_id"]}, {"$set": {"status": restore_status}})
     await log_action(user, "update_maintenance_issue", f"{issue.get('title')} -> {body.status}")
     return _shape(await db.maintenance_issues.find_one({"_id": issue["_id"]}), user)

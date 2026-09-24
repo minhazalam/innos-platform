@@ -116,25 +116,23 @@ async def update_task(task_id: str, body: TaskUpdate, user: dict = Depends(requi
         updates["completed_at"] = now
     await db.housekeeping_tasks.update_one({"_id": task["_id"]}, {"$set": updates})
     room = await db.rooms.find_one({"_id": oid(task["room_id"]), "property_id": user["property_id"]})
-    # Do not overwrite an occupied room's live status when staff are doing an
-    # in-stay service task. For checkout cleans, account for other active work
-    # and maintenance before marking the room ready.
+    # Keep room readiness consistent with every open issue/task. Maintenance
+    # and out-of-order states take precedence; in-progress cleaning precedes
+    # queued cleaning, and only a fully clear room becomes available.
     next_room_status = None
-    if room and room.get("status") != "occupied" and body.status == "in_progress":
-        next_room_status = "cleaning"
-    if room and room.get("status") != "occupied" and body.status == "completed":
+    if room and room.get("status") != "occupied":
         open_issue = await db.maintenance_issues.find_one({
             "property_id": user["property_id"], "room_id": task["room_id"],
             "status": {"$in": ["open", "in_progress"]},
         })
-        other_tasks = await db.housekeeping_tasks.find({
+        active_tasks = await db.housekeeping_tasks.find({
             "property_id": user["property_id"], "room_id": task["room_id"],
-            "_id": {"$ne": task["_id"]}, "status": {"$in": ["pending", "in_progress"]},
+            "status": {"$in": ["pending", "in_progress"]},
         }).to_list(100)
-        next_room_status = (
-            "maintenance" if open_issue else
-            "cleaning" if any(item.get("status") == "in_progress" for item in other_tasks) else
-            "dirty" if other_tasks else "available"
+        next_room_status = "maintenance" if open_issue else (
+            "out_of_order" if room.get("status") == "out_of_order" else
+            "cleaning" if any(item.get("status") == "in_progress" for item in active_tasks) else
+            "dirty" if active_tasks or body.status == "pending" else "available"
         )
     if next_room_status:
         await db.rooms.update_one({"_id": oid(task["room_id"]), "property_id": user["property_id"]}, {"$set": {"status": next_room_status}})

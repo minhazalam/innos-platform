@@ -37,14 +37,13 @@ export default function NewReservationDialog({ trigger, presetRoomId }) {
     queryKey: ["guests"], queryFn: async () => (await api.get("/guests")).data, enabled: open,
   });
 
-  const selectedRoom = rooms.find((r) => r.id === roomId);
+  const bookableRooms = rooms.filter((r) => !["maintenance", "out_of_order"].includes(r.status));
+  const selectedRoom = bookableRooms.find((r) => r.id === roomId);
   const nights = useMemo(() => {
     const d = (new Date(checkOut) - new Date(checkIn)) / 86400000;
     return d > 0 ? d : 0;
   }, [checkIn, checkOut]);
   const total = selectedRoom ? selectedRoom.base_price * (nights || 1) : 0;
-
-  const bookableRooms = rooms.filter((r) => !["out_of_order"].includes(r.status));
 
   const reset = () => {
     setGuestMode("new"); setGuestId(""); setName(""); setPhone(""); setEmail("");
@@ -66,7 +65,7 @@ export default function NewReservationDialog({ trigger, presetRoomId }) {
   });
 
   const submit = () => {
-    if (!roomId) return toast.error("Select a room");
+    if (!bookableRooms.some((room) => room.id === roomId)) return toast.error("Select a room that is available for reservations");
     const body = {
       room_id: roomId, check_in: checkIn, check_out: checkOut,
       num_guests: parseInt(numGuests) || 1, source, special_requests: special,
@@ -127,6 +126,7 @@ export default function NewReservationDialog({ trigger, presetRoomId }) {
                 ))}
               </SelectContent>
             </Select>
+            <p className="text-xs text-muted-foreground">Rooms in maintenance or marked out of order can’t be reserved.</p>
           </div>
 
           <div className="grid grid-cols-2 gap-3">

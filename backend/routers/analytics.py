@@ -16,7 +16,10 @@ async def summary(period: str = "week", user: dict = Depends(require("analytics"
     start = end - timedelta(days=1 if period == "today" else 7 if period == "week" else 30)
     start_iso, end_iso = start.isoformat(), end.isoformat()
     property_id = user["property_id"]
-    rooms = await db.rooms.find({"property_id": property_id, "status": {"$ne": "out_of_order"}}).to_list(1000)
+    rooms = await db.rooms.find({
+        "property_id": property_id,
+        "status": {"$nin": ["maintenance", "out_of_order"]},
+    }).to_list(1000)
     room_count = len(rooms)
     room_nights = 0
     room_revenue = 0.0
